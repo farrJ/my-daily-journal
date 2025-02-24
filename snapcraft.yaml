@@ -1,0 +1,19 @@
+name: my-daily-journal
+base: core22
+version: '1.1'
+summary: A simple journaling tool
+description: |
+  A command-line journaling tool
+grade: devel
+confinement: devmode
+
+apps:
+  my-daily-journal:
+    command: bin/my-daily-journal
+
+parts:
+  my-daily-journal:
+    source: .
+    plugin: dump
+    organize:
+      my-daily-journal: bin/my-daily-journal

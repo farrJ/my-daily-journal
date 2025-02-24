@@ -1,0 +1,572 @@
+# My Daily Journal
+# Author: Josh Farr
+# Date: 2025-02-23
+#
+# Description:
+# My Daily Journal is a command-line journal application that allows users to create, edit,
+# search, and delete journal entries efficiently. It supports multiple journal files, 
+# automatic backups, and undo functionality. The application is designed for cross-platform 
+# compatibility, supporting both macOS and Ubuntu Linux.
+#
+# Features:
+# - CLI-based journaling system
+# - Multi-file journal support
+# - Auto-backup and undo system
+# - Search functionality
+# - Paginated entry display
+# - Snap and .deb packaging for easy distribution
+
+#!/usr/bin/env python3
+import os
+import sys
+import textwrap
+import shutil
+import platform
+from datetime import datetime
+
+# --- GLOBAL SETTINGS ---
+
+# Initially, we enable color usage, timestamps, and set a default wrap width
+USE_COLOR = True
+SHOW_TIMESTAMPS = True
+MESSAGE_WRAP_WIDTH = 50
+
+journal_file = None  # We'll store the current file name here
+DEFAULT_FILE = "entries.txt"
+last_action = "None"  # Track the last action performed (for status line)
+
+# --- ANSI color codes (we'll wrap them so we can turn them off if USE_COLOR is False) ---
+def _col(code):
+    """Return ANSI code if USE_COLOR is True, else return empty string."""
+    return code if USE_COLOR else ""
+
+CYAN = _col("\033[36m")
+GREEN = _col("\033[32m")
+RED = _col("\033[31m")
+RESET = _col("\033[0m")
+
+def apply_color_codes():
+    """Rebuild the color code variables if the user toggles USE_COLOR."""
+    global CYAN, GREEN, RED, RESET
+    CYAN  = _col("\033[36m")
+    GREEN = _col("\033[32m")
+    RED   = _col("\033[31m")
+    RESET = _col("\033[0m")
+
+# --- UTILITY FUNCTIONS ---
+
+def clear_screen():
+    """Clear the terminal for a fresh UI."""
+    if platform.system().lower().startswith('win'):
+        os.system('cls')
+    else:
+        os.system('clear')
+
+def color_print(msg, color=RESET):
+    """Utility function to print in a given color (if USE_COLOR is True)."""
+    print(f"{color}{msg}{RESET}")
+
+def list_txt_files():
+    """Return a list of all .txt files in the current directory."""
+    return [f for f in os.listdir('.') if f.endswith('.txt')]
+
+def pick_journal_file():
+    """
+    Prompt the user to pick from existing .txt files or create a new one.
+    We'll store the choice in global 'journal_file'.
+    """
+    global journal_file, last_action
+
+    color_print("Change Journal File", CYAN)
+    
+    txt_files = list_txt_files()
+    if txt_files:
+        color_print("\nHere are the .txt files in the current directory:", CYAN)
+        for idx, f in enumerate(txt_files, start=1):
+            print(f"{idx}. {f}")
+        print("Or type 'new' to create a new file.")
+    else:
+        color_print("No .txt files found. You'll need to create a new one.", RED)
+
+    choice = input("Your choice (number/new): ").strip().lower()
+
+    if choice == "new" or not txt_files:
+        # Create a new file
+        new_name = input("Enter the new file name (without .txt): ").strip()
+        if not new_name.endswith(".txt"):
+            new_name += ".txt"
+        journal_file = new_name
+        color_print(f"Created new file '{journal_file}'.", GREEN)
+        last_action = f"New file chosen: {journal_file}"
+    else:
+        # Possibly a number if .txt files exist
+        if txt_files and choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(txt_files):
+                chosen_existing = txt_files[idx - 1]
+                journal_file = chosen_existing
+                color_print(f"Using existing file: {journal_file}", GREEN)
+                last_action = f"Switched to file: {journal_file}"
+            else:
+                color_print("Invalid index. Using default file instead.", RED)
+                journal_file = DEFAULT_FILE
+                last_action = f"Switched to default file: {DEFAULT_FILE}"
+        else:
+            # Possibly typed a file name
+            if not choice.endswith(".txt"):
+                choice += ".txt"
+            if os.path.exists(choice):
+                journal_file = choice
+                color_print(f"Using '{journal_file}'.", GREEN)
+                last_action = f"Switched to file: {journal_file}"
+            else:
+                # It's new
+                journal_file = choice
+                color_print(f"Created new file '{journal_file}'.", GREEN)
+                last_action = f"New file chosen: {journal_file}"
+
+def ensure_file_chosen():
+    """If we haven't chosen a file yet, pick one."""
+    global journal_file
+    if journal_file is None:
+        pick_journal_file()
+
+def _backup_file():
+    """
+    Create a .bak file in the same folder as 'journal_file'
+    (no environment detection—just do journal_file + '.bak').
+    """
+    global journal_file
+    if not journal_file or not os.path.exists(journal_file):
+        return  # Nothing to back up
+
+    backup_name = journal_file + ".bak"
+    try:
+        shutil.copy2(journal_file, backup_name)
+    except Exception as e:
+        color_print(f"Warning: Could not create backup: {e}", RED)
+
+def undo_last_operation():
+    """
+    Restore from 'journal_file.bak' if it exists, overwriting the main file.
+    Single-level undo: reverts the last operation that changed the file.
+    """
+    global journal_file, last_action
+    if not journal_file:
+        color_print("No journal file to undo.", RED)
+        return
+
+    backup_name = journal_file + ".bak"
+    if not os.path.exists(backup_name):
+        color_print("No backup found. Cannot undo.", RED)
+        return
+    
+    sure = input("Are you sure you want to UNDO the last operation? (Y/N): ").strip().lower()
+    if sure != "y":
+        color_print("Undo cancelled.", RED)
+        last_action = "Undo cancelled"
+        return
+
+    try:
+        shutil.copy2(backup_name, journal_file)
+        color_print("Undo successful! File restored from backup.", GREEN)
+        last_action = "Undid the last operation."
+    except Exception as e:
+        color_print(f"Error while undoing: {e}", RED)
+        last_action = f"Undo failed: {e}"
+
+def create_new_entry_single():
+    """Single-line journal entry."""
+    global last_action
+    ensure_file_chosen()
+    msg = input("Enter your single-line entry message: ").strip()
+    if not msg:
+        color_print("No message entered. Aborting.", RED)
+        last_action = "Single-line entry aborted."
+        return
+    _write_entry(msg)
+    last_action = "Added single-line entry."
+
+def create_new_entry_multiline():
+    """Multiline entry (Ctrl+D to finish)."""
+    global last_action
+    ensure_file_chosen()
+    color_print("Enter your journal entry. Press Ctrl+D (Linux/Mac) or Ctrl+Z (Windows) to finish:", CYAN)
+    lines = sys.stdin.read()
+    msg = lines.strip()
+    if not msg:
+        color_print("No entry provided. Aborting.", RED)
+        last_action = "Multiline entry aborted."
+        return
+    _write_entry(msg)
+    last_action = "Added multiline entry."
+
+def _write_entry(message):
+    """Helper to write a single or multiline message to the chosen file."""
+    global journal_file
+    _backup_file()  # for undo
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"{timestamp}\t{message}\n"
+    with open(journal_file, "a", encoding="utf-8") as f:
+        f.write(entry)
+
+def load_entries():
+    """Load all entries from the current journal file."""
+    ensure_file_chosen()
+    if not os.path.exists(journal_file):
+        return []
+    entries = []
+    with open(journal_file, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t", 1)
+            if len(parts) == 2:
+                timestamp, message = parts
+                entries.append((timestamp, message))
+    return entries
+
+def _rewrite_entries(entries):
+    """Overwrite the entire file with the updated list of entries (for edit/delete)."""
+    global journal_file
+    _backup_file()  # for undo
+    with open(journal_file, "w", encoding="utf-8") as f:
+        for (timestamp, message) in entries:
+            f.write(f"{timestamp}\t{message}\n")
+
+def display_entries_table(entries, title="Listing Entries"):
+    """
+    Print entries in a simple tabular format with line-wrapping for long messages.
+    If SHOW_TIMESTAMPS is False, we hide them.
+    Also adds a blank line after each entry for extra spacing.
+    """
+    color_print(f"\n--- {title} in '{journal_file}' ---\n", CYAN)
+    if not entries:
+        color_print("No entries found.", RED)
+        return
+
+    idx_width = 5
+    ts_width = 19  # "YYYY-MM-DD HH:MM:SS"
+
+    # Print header
+    header_parts = []
+    header_parts.append("Index".ljust(idx_width))
+    if SHOW_TIMESTAMPS:
+        header_parts.append("Timestamp".ljust(ts_width))
+    header_parts.append("Message")
+
+    header_line = "  ".join(header_parts)
+    print(header_line)
+    print("-" * (len(header_line) + 10))
+
+    for i, (timestamp, message) in enumerate(entries):
+        wrapped_lines = textwrap.wrap(message, width=MESSAGE_WRAP_WIDTH) or [""]
+        idx_str = str(i).ljust(idx_width)
+        if SHOW_TIMESTAMPS:
+            ts_str = timestamp.ljust(ts_width)
+            first_line = f"{idx_str}  {ts_str}  {wrapped_lines[0]}"
+        else:
+            first_line = f"{idx_str}  {wrapped_lines[0]}"
+
+        print(first_line)
+        for extra_line in wrapped_lines[1:]:
+            if SHOW_TIMESTAMPS:
+                print(f"{'':{idx_width}}  {'':{ts_width}}  {extra_line}")
+            else:
+                print(f"{'':{idx_width}}  {extra_line}")
+        print()
+
+def display_entries_paginated(entries, title="Listing Entries", page_size=5):
+    """
+    Paginate the entries so we don't overflow the terminal with huge lists.
+    page_size=5 is just an example; adjust as needed.
+    """
+    if not entries:
+        color_print("No entries found.", RED)
+        return
+    
+    total = len(entries)
+    total_pages = (total + page_size - 1) // page_size
+    page = 0
+    while True:
+        clear_screen()
+        start = page * page_size
+        end = start + page_size
+        batch = entries[start:end]
+        color_print(f"{title} - Page {page+1}/{total_pages}", CYAN)
+        display_entries_table(batch, title="")
+        page += 1
+        if page >= total_pages:
+            break
+        nxt = input("Show next page? (Y/N): ").strip().lower()
+        if nxt != 'y':
+            break
+
+def list_entries(paginate=True):
+    """Show all entries in full, optionally paginated, using table format (with wrapping)."""
+    entries = load_entries()
+    if paginate:
+        display_entries_paginated(entries, title="Listing Entries", page_size=5)
+    else:
+        display_entries_table(entries, title="Listing Entries")
+
+def read_entry():
+    """Prompt user to read an entry by index, optionally listing them first (table)."""
+    global last_action
+    ensure_file_chosen()
+    color_print(f"\n--- Reading an Entry from '{journal_file}' ---\n", CYAN)
+    entries = load_entries()
+    if not entries:
+        color_print("No entries to read. Try adding some first.", RED)
+        last_action = "Read aborted (no entries)."
+        return
+    show_list = input("Would you like to see the list of entries first? (Y/N): ").strip().lower()
+    if show_list == "y":
+        list_entries()
+
+    index_str = input("Enter the index to read: ").strip()
+    if not index_str.isdigit():
+        color_print("Invalid index. Must be a number.", RED)
+        last_action = "Read aborted (invalid index)."
+        return
+    idx = int(index_str)
+    if idx < 0 or idx >= len(entries):
+        color_print(f"Error: Entry {idx} does not exist.", RED)
+        last_action = "Read aborted (index out of range)."
+        return
+    timestamp, message = entries[idx]
+    color_print(f"\nEntry {idx}:", GREEN)
+    if SHOW_TIMESTAMPS:
+        print(f"Timestamp: {timestamp}")
+    print(f"Message: {message}")
+    last_action = f"Read entry {idx}"
+
+def edit_entry():
+    """
+    Let the user replace an existing entry with new multiline text.
+    We'll rewrite the entire file after the edit.
+    """
+    global last_action
+    ensure_file_chosen()
+    color_print(f"\n--- Edit an Entry in '{journal_file}' ---\n", CYAN)
+    entries = load_entries()
+    if not entries:
+        color_print("No entries to edit.", RED)
+        last_action = "Edit aborted (no entries)."
+        return
+
+    list_entries()  
+    index_str = input("Enter the index to edit: ").strip()
+    if not index_str.isdigit():
+        color_print("Invalid index.", RED)
+        last_action = "Edit aborted (invalid index)."
+        return
+    idx = int(index_str)
+    if idx < 0 or idx >= len(entries):
+        color_print(f"Error: Entry {idx} does not exist.", RED)
+        last_action = "Edit aborted (out of range)."
+        return
+
+    old_timestamp, old_message = entries[idx]
+    color_print(f"\nOld message:\n{old_message}\n", RED)
+
+    sure = input(f"Are you sure you want to EDIT entry {idx}? (Y/N): ").strip().lower()
+    if sure != 'y':
+        color_print("Edit cancelled.", RED)
+        last_action = "Edit cancelled."
+        return
+
+    color_print("Enter your new text for this entry (Ctrl+D to finish):", CYAN)
+    new_text = sys.stdin.read().strip()
+    if not new_text:
+        color_print("No new text provided. Edit aborted.", RED)
+        last_action = "Edit aborted (empty text)."
+        return
+
+    entries[idx] = (old_timestamp, new_text)
+    _rewrite_entries(entries)
+    color_print(f"Entry {idx} edited successfully.", GREEN)
+    last_action = f"Edited entry {idx}"
+
+def delete_entry():
+    """Remove an entry by index and rewrite the file."""
+    global last_action
+    ensure_file_chosen()
+    color_print(f"\n--- Delete an Entry from '{journal_file}' ---\n", CYAN)
+    entries = load_entries()
+    if not entries:
+        color_print("No entries to delete.", RED)
+        last_action = "Delete aborted (no entries)."
+        return
+
+    list_entries()
+    index_str = input("Enter the index to delete: ").strip()
+    if not index_str.isdigit():
+        color_print("Invalid index.", RED)
+        last_action = "Delete aborted (invalid index)."
+        return
+    idx = int(index_str)
+    if idx < 0 or idx >= len(entries):
+        color_print(f"Error: Entry {idx} does not exist.", RED)
+        last_action = "Delete aborted (out of range)."
+        return
+
+    sure = input(f"Are you sure you want to DELETE entry {idx}? (Y/N): ").strip().lower()
+    if sure != 'y':
+        color_print("Delete cancelled.", RED)
+        last_action = "Delete cancelled."
+        return
+
+    del entries[idx]
+    _rewrite_entries(entries)
+    color_print(f"Entry {idx} deleted.", GREEN)
+    last_action = f"Deleted entry {idx}"
+
+def show_help():
+    """
+    Display additional help info about multiline usage, undo, etc.
+    """
+    global last_action
+    color_print("\n--- My Daily Journal: HELP ---\n", CYAN)
+    print("""\
+Multiline entries:
+  Press Ctrl+D (Linux/Mac) or Ctrl+Z (Windows) when done typing.
+
+Undo:
+  The application creates a single backup before any change (new, edit, delete).
+  .bak files are stored in the same directory as the main file.
+
+Editing an Entry:
+  The original timestamp is kept. You can replace the text with new multiline content,
+  after confirming you really want to edit it.
+
+Deleting an Entry:
+  Removes the entry from the file (with confirmation). You can Undo once if you made a mistake.
+
+Changing File:
+  Switch to another .txt or create a new file. Each file has its own entries.
+
+Hide Timestamps:
+  If you set SHOW_TIMESTAMPS = False at the top of this code, you won't see timestamps in the table.
+
+Wrap Width:
+  Adjust MESSAGE_WRAP_WIDTH to control how many characters before a line breaks in the table.
+
+Pagination:
+  Large lists are broken into pages so the terminal is not overwhelmed.
+
+Enjoy your journaling!
+""")
+    last_action = "Displayed help"
+
+def preferences_menu():
+    """
+    Let user adjust wrap width, toggle timestamps, toggle color usage.
+    """
+    global USE_COLOR, SHOW_TIMESTAMPS, MESSAGE_WRAP_WIDTH, last_action
+
+    while True:
+        clear_screen()
+        color_print("--- Preferences ---", CYAN)
+        print(f"[1] Toggle Color (currently {'ON' if USE_COLOR else 'OFF'})")
+        print(f"[2] Toggle Timestamps (currently {'ON' if SHOW_TIMESTAMPS else 'OFF'})")
+        print(f"[3] Set Wrap Width (currently {MESSAGE_WRAP_WIDTH})")
+        print("[4] Back to Main Menu")
+
+        choice = input("Select an option (1-4): ").strip()
+        if choice == "1":
+            USE_COLOR = not USE_COLOR
+            apply_color_codes()
+            color_print(f"Color usage is now {'ON' if USE_COLOR else 'OFF'}.", GREEN)
+            last_action = f"Color toggled to {'ON' if USE_COLOR else 'OFF'}."
+        elif choice == "2":
+            SHOW_TIMESTAMPS = not SHOW_TIMESTAMPS
+            color_print(f"Timestamps are now {'ON' if SHOW_TIMESTAMPS else 'OFF'}.", GREEN)
+            last_action = f"Timestamps toggled to {'ON' if SHOW_TIMESTAMPS else 'OFF'}."
+        elif choice == "3":
+            new_width = input("Enter new wrap width: ").strip()
+            if new_width.isdigit():
+                MESSAGE_WRAP_WIDTH = int(new_width)
+                color_print(f"Wrap width set to {MESSAGE_WRAP_WIDTH}.", GREEN)
+                last_action = f"Wrap width changed to {MESSAGE_WRAP_WIDTH}"
+            else:
+                color_print("Invalid number. Wrap width unchanged.", RED)
+                last_action = "Wrap width change failed."
+        elif choice == "4":
+            return
+        else:
+            color_print("Invalid choice.", RED)
+        
+        input("\nPress Enter to continue...")
+
+def main_menu():
+    """Show the main menu in a loop, clearing screen each time for a fresh UI."""
+    global last_action
+    while True:
+        clear_screen()
+        # Display status
+        color_print(f"LAST ACTION: {last_action}", GREEN)
+
+        current_file_str = journal_file if journal_file else "None (not set)"
+        color_print(f"CURRENT FILE: {current_file_str}\n", CYAN)
+
+        print(
+            "[1] New Entry\n"
+            "[2] Change File\n"
+            "[3] List Entries (Paginated)\n"
+            "[4] Read Entry\n"
+            "[5] Search\n"
+            "[6] Edit Entry\n"
+            "[7] Delete Entry\n"
+            "[8] Undo\n"
+            "[9] Help\n"
+            "[10] Preferences\n"
+            "[11] Quit"
+        )
+
+        choice = input("Select an option (1-11): ").strip()
+        color_print(f"Choice: {choice}\n", CYAN)
+
+        if choice == "1":
+            color_print("\nNew Entry Options:", CYAN)
+            print("[A] Single-line Entry\n[B] Multiline Entry\n[Q] Cancel")
+            sub_choice = input("Choose (A/B/Q): ").strip().lower()
+            if sub_choice == "a":
+                create_new_entry_single()
+            elif sub_choice == "b":
+                create_new_entry_multiline()
+            else:
+                color_print("Cancelled.", RED)
+                last_action = "New entry cancelled."
+        elif choice == "2":
+            pick_journal_file()
+        elif choice == "3":
+            list_entries(paginate=True)
+            last_action = "Listed entries"
+        elif choice == "4":
+            read_entry()
+        elif choice == "5":
+            search_entries()
+            last_action = "Searched entries"
+        elif choice == "6":
+            edit_entry()
+        elif choice == "7":
+            delete_entry()
+        elif choice == "8":
+            undo_last_operation()
+        elif choice == "9":
+            show_help()
+        elif choice == "10":
+            preferences_menu()
+        elif choice == "11":
+            color_print("Goodbye!", GREEN)
+            break
+        else:
+            color_print("Invalid choice. Please pick 1-11.", RED)
+
+        input("\nPress Enter to return to the main menu...")
+
+def main():
+    color_print("Welcome to My Daily Journal!", CYAN)
+    main_menu()
+
+if __name__ == "__main__":
+    main()
